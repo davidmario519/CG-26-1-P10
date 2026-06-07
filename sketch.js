@@ -6,6 +6,7 @@
 
 let cloudShader;
 let myFont;
+let qrImg;   // 우하단 참여 유도 QR (관객 → 폰으로 스캔 → fly.html 합류)
 
 // 고정 카메라 (메인 스크린). 매 프레임 미세하게 드리프트시켜 "멈춰 보임"을 방지
 let camRo = [0, 0.5, 0];      // origin
@@ -52,6 +53,7 @@ const WEATHER_URL =
 function preload() {
   cloudShader = loadShader('effect.vert', 'effect.frag');
   myFont = loadFont('GalmuriMono11.ttf');
+  qrImg = loadImage('src/QR.png');
 }
 
 function setup() {
@@ -560,12 +562,50 @@ function drawApertureHUD() {
 
   drawWeatherHUD();
 
-  if (frameCount % 40 < 20) {
-    rect(width - 80, height - 78, 18, 18);
-  }
+  // ── 우하단: 관객 참여 QR + 라이브 인디케이터 ──
+  let qr = drawJoinQR();   // 코너에 스캔용 QR 패널
 
   textSize(14);
-  text("SYSTEM LIVE FEED", width - 230, height - 64);
+  fill(cream);
+  let feedLabel = "SYSTEM LIVE FEED";
+  let fw = textWidth(feedLabel);
+  let feedX = width - 24 - fw;             // QR 패널 오른쪽 가장자리(width-24)에 맞춰 우측 정렬
+  let feedY = (qr ? qr.y : height - 24) - 16;
+  text(feedLabel, feedX, feedY);
+  if (frameCount % 40 < 20) {
+    rect(feedX - 22, feedY - 12, 13, 13);  // REC 점멸
+  }
+}
+
+// 우하단 QR: 지나가던 관객이 폰으로 스캔 → fly.html 접속 → 자기 새떼 합류.
+// 대비 확보용 밝은 패널 위에 그려 어두운 하늘에서도 스캔되게 한다. 패널 영역을 반환.
+function drawJoinQR() {
+  if (!qrImg) return null;
+  let qrSize = 104;
+  let pad = 11;
+  let labelH = 22;
+  let panelW = qrSize + pad * 2;
+  let panelH = qrSize + pad * 2 + labelH;
+  let x = width - panelW - 24;
+  let y = height - panelH - 24;
+
+  push();
+  noStroke();
+  fill(253, 253, 237, 240);                       // 크림색 패널
+  rect(x, y, panelW, panelH, 6);
+  fill(255);                                       // QR 뒤 순백(스캔 안정성)
+  rect(x + pad, y + pad, qrSize, qrSize);
+  image(qrImg, x + pad, y + pad, qrSize, qrSize);
+
+  fill(20, 24, 40, 235);                           // 어두운 라벨
+  textFont(myFont);
+  textSize(10);
+  textAlign(CENTER, CENTER);
+  text("SCAN TO JOIN THE FLOCK", x + panelW / 2, y + pad + qrSize + labelH / 2 + 1);
+  textAlign(LEFT, BASELINE);
+  pop();
+
+  return { x, y, w: panelW, h: panelH };
 }
 
 function keyPressed() {

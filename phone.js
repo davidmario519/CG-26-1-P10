@@ -78,13 +78,14 @@ function tryEnableMotion() {
     DeviceOrientationEvent.requestPermission()
       .then(s => {
         permState = s;   // 'granted' | 'denied'
-        if (s === 'granted') { window.addEventListener('deviceorientation', onTilt); useTilt = true; }
+        if (s === 'granted') window.addEventListener('deviceorientation', onTilt);
       })
       .catch(err => { permState = 'err:' + (err && err.name ? err.name : err); });
   } else if (typeof window.DeviceOrientationEvent !== 'undefined') {
+    // 리스너만 등록. useTilt는 실제 기울기 이벤트가 올 때 onTilt에서 켠다.
+    // (데스크톱 크롬은 API는 있지만 이벤트가 안 와서 false로 남음 → 마우스 드래그 사용)
     window.addEventListener('deviceorientation', onTilt);
-    useTilt = true;
-    permState = 'auto';   // 안드로이드 등: 팝업 없이 바로 동작
+    permState = 'listening';
   } else {
     permState = 'no-API';
   }
@@ -115,8 +116,10 @@ function beginFlight() {
 }
 
 function onTilt(e) {
-  if (e.gamma === null && e.beta === null) return;
+  if (e.gamma === null && e.beta === null) return;   // 데스크톱: 값이 안 와 여기서 빠짐 → 드래그 유지
   tiltEvents++;
+  useTilt = true;   // 실제 기울기 데이터가 도착할 때만 기울기 모드로 전환
+
   // 첫 이벤트의 자세를 '수평'으로 보정(폰을 든 각도가 기준이 됨)
   if (gammaNeutral === null) gammaNeutral = e.gamma || 0;
   if (betaNeutral === null) betaNeutral = e.beta || 0;
@@ -318,7 +321,12 @@ function drawPhoneHUD(t) {
 
   if (started) {
     textAlign(CENTER, BOTTOM);
-    text("드래그하거나 기울여 방향을 바꾸세요", cx, height - 24);
+    fill(253, 253, 237, 210);
+    textSize(13);
+    text("Check your flock in front of your screen", cx, height - 42);
+    fill(253, 253, 237, 130);
+    textSize(11);
+    text(useTilt ? "Tilt to navigate" : "Drag to navigate", cx, height - 24);
   }
   textAlign(LEFT, BASELINE);
 }
