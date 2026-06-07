@@ -5,6 +5,11 @@ let myFont;
 let mx = 0.5;
 let my = 0.5;
 
+// WASD 자유 비행 카메라: 위치는 JS가 누적(camPos), 시점(yaw/pitch)은 마우스가 담당
+let camPos = [0, 0.5, 0];   // 카메라 월드 좌표 [x, y, z]
+const MOVE_SPEED = 2.5;     // 초당 이동 거리(units/sec)
+const SPRINT_MULT = 3.0;    // Shift 가속 배율
+
 let targetHistory = [];
 const MAX_HISTORY = 4;
 
@@ -50,10 +55,13 @@ function draw() {
   mx = lerp(mx, targetMx, 0.06);
   my = lerp(my, targetMy, 0.06);
 
+  updateCamera();
+
   shader(cloudShader);
   cloudShader.setUniform('u_resolution', [width, height]);
   cloudShader.setUniform('u_time', millis() / 1000.0);
   cloudShader.setUniform('u_mouse', [mx, my]);
+  cloudShader.setUniform('u_camPos', camPos);
 
   quad(-1, -1, 1, -1, 1, 1, -1, 1);
 
@@ -63,6 +71,41 @@ function draw() {
   translate(-width / 2, -height / 2);
   drawApertureHUD();
   _renderer.GL.enable(_renderer.GL.DEPTH_TEST);
+}
+
+// WASD: 수평 이동 / Q,E: 고도 / Shift: 부스트. 시점(yaw)을 따라 전진 방향이 회전한다.
+function updateCamera() {
+  let dt = deltaTime / 1000.0;   // 프레임레이트 독립적으로 (초 단위)
+
+  // 셰이더와 동일한 yaw 매핑으로 수평 전진/우측 벡터를 구한다
+  let yaw = map(mx, 0, 1, -0.99, 0.99);
+  let fx = Math.sin(yaw);
+  let fz = -1.0 + Math.cos(yaw) * 0.25;
+  let fl = Math.hypot(fx, fz);
+  fx /= fl; fz /= fl;            // 전진 방향(정규화)
+  let rx = -fz, rz = fx;         // 카메라 오른쪽 방향
+
+  let vx = 0, vy = 0, vz = 0;
+  if (keyIsDown(87)) { vx += fx; vz += fz; }   // W 전진
+  if (keyIsDown(83)) { vx -= fx; vz -= fz; }   // S 후진
+  if (keyIsDown(68)) { vx += rx; vz += rz; }   // D 우측
+  if (keyIsDown(65)) { vx -= rx; vz -= rz; }   // A 좌측
+  if (keyIsDown(69)) { vy += 1; }              // E 상승
+  if (keyIsDown(81)) { vy -= 1; }              // Q 하강
+
+  let mag = Math.hypot(vx, vy, vz);
+  if (mag > 0) {
+    // 대각 이동이 빨라지지 않도록 정규화 후 속도 적용
+    let step = MOVE_SPEED * (keyIsDown(SHIFT) ? SPRINT_MULT : 1.0) * dt / mag;
+    camPos[0] += vx * step;
+    camPos[1] += vy * step;
+    camPos[2] += vz * step;
+  }
+
+  // 바다(y=-5.2) 아래로 잠기거나 구름대 위로 완전히 벗어나지 않도록 제한
+  camPos[0] = constrain(camPos[0], -60, 60);
+  camPos[1] = constrain(camPos[1], -4.8, 4.0);
+  camPos[2] = constrain(camPos[2], -60, 60);
 }
 
 async function fetchWeather() {
@@ -307,8 +350,13 @@ function drawApertureHUD() {
 
   textSize(14);
   text("CAMERA FRAME RATE: " + floor(frameRate()) + " FPS", 50, 60);
-  text("ATMOSPHERE ALTITUDE: " + (4500 + floor(frameCount * 0.2)) + " M", 50, 85);
-  text("REL_SPEED: 240.5 KNOTS", 50, 110);
+  // 고도는 해수면(y=-5.2) 기준 실제 카메라 높이를 미터로 환산
+  text("ATMOSPHERE ALTITUDE: " + floor((camPos[1] + 5.2) * 800) + " M", 50, 85);
+  text("NAV  X:" + nf(camPos[0], 1, 1) + "  Z:" + nf(camPos[2], 1, 1), 50, 110);
+
+  fill(transparentCream);
+  text("FLIGHT  W A S D MOVE   Q E ALT   SHIFT BOOST", 50, 135);
+  fill(cream);
 
   drawWeatherHUD();
 

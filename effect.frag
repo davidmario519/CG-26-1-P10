@@ -6,6 +6,7 @@ out vec4 fragColor;
 uniform vec2 u_resolution;
 uniform float u_time;
 uniform vec2 u_mouse;
+uniform vec3 u_camPos;  // JS가 WASD 입력으로 누적해 넘겨주는 카메라 위치
 
 #define TURBULENCE 0
 
@@ -357,9 +358,9 @@ vec4 raymarch(in vec3 ro, in vec3 rd, in vec3 bgcol, in ivec2 px, float dayCycle
     vec4 sum = vec4(0.0);
     float t = 0.05 * hash(vec3(vec2(px), u_time));
 
-    MARCH(24, map5);
-    MARCH(12, map4);
-    MARCH(10, map3);
+    MARCH(36, map5);
+    MARCH(24, map4);
+    MARCH(12, map3);
     MARCH(8, map2);
 
     return clamp(sum, 0.0, 1.0);
@@ -397,29 +398,17 @@ void main() {
 
     float t = u_time;
 
-float heightSpeed = 0.08;
 float yawRange = 0.99;
 float pitchDown = -0.70;
 float pitchUp = 0.32;
-float cameraLow = -0.45;
-float cameraHigh = 1.45;
 
 // 마우스로 시점을 직접 조종 (u_mouse는 0~1 정규화 좌표)
 float yaw = mix(-yawRange, yawRange, u_mouse.x);   // mouseX → Yaw(좌우)
 float pitch = mix(pitchUp, pitchDown, u_mouse.y);  // mouseY → Pitch(상하, 화면 위=올려다봄)
-
-// 카메라 높이는 기존처럼 자동으로 떠다니게 유지
-float nHeight = noise(vec3(t * heightSpeed, 15.0, 2.0)) * 0.5 + 0.5;
-float camY = mix(cameraLow, cameraHigh, nHeight);
-camY += sin(t * 0.21 + 0.8) * 0.10;
-
 pitch = clamp(pitch, pitchDown, pitchUp);
-camY = clamp(camY, cameraLow, cameraHigh);
-    vec3 ro = vec3(
-        sin(t * 0.08) * 0.18,
-        camY,
-        cos(t * 0.07) * 0.18
-    );
+
+    // 카메라 위치는 JS가 WASD 입력으로 누적해 넘겨준다 (자유 비행)
+    vec3 ro = u_camPos;
 
     vec3 ta = ro + vec3(
         sin(yaw),
