@@ -1,17 +1,36 @@
-/// press F for fullscreen
+/// 메인 스크린(공공 스크린) 뷰
+/// - 카메라 고정(미세 드리프트만). 셰이더가 그리는 하늘/구름/바다를 옆에서 들여다보는 "어항" 시점
+/// - 유저의 bird flock(boids)을 어항 안에 띄운다. x/y/z 전 축 주기 경계로 감겨(반대 면에서 재등장)
+/// - 새는 셰이더와 동일한 카메라 수학으로 직접 투영한 2D 빌보드로 배경 위에 합성
+/// 데모: [N] flock 추가(유저 접속 흉내) / [X] flock 제거(퇴장 흉내) / [F] 풀스크린
 
 let cloudShader;
 let myFont;
-let mx = 0.5;
-let my = 0.5;
 
-// WASD 자유 비행 카메라: 위치는 JS가 누적(camPos), 시점(yaw/pitch)은 마우스가 담당
-let camPos = [0, 0.5, 0];   // 카메라 월드 좌표 [x, y, z]
-const MOVE_SPEED = 2.5;     // 초당 이동 거리(units/sec)
-const SPRINT_MULT = 3.0;    // Shift 가속 배율
+// 고정 카메라 (메인 스크린). 매 프레임 미세하게 드리프트시켜 "멈춰 보임"을 방지
+let camRo = [0, 0.5, 0];      // origin
+let camTa = [0, 0.44, -1];    // target
+let camBasis;                 // {cu, cv, cw} — 셰이더 setCamera와 동일하게 계산
 
-let targetHistory = [];
-const MAX_HISTORY = 4;
+// ── 어항(stage) 박스: 이 직육면체 안에서 새들이 주기 경계로 감긴다 ──
+const BOX_MIN = [-5.5, -4.0, -11.0];   // 최소 모서리 (바닥은 바다 근처, 뒤쪽은 안개 속)
+const BOX_SIZE = [11.0, 7.0, 8.0];     // 크기 → 중심 (0, -0.5, -7), 카메라 앞쪽
+const SHELL = 0.9;                     // 면 근처 페이드 두께(이음새 숨김)
+
+// ── boids ──
+let flocks = [];
+const FLOCK_SIZE = 30;
+const MAX_FLOCKS = 6;
+const MAX_SPEED = 1.6;
+const MAX_FORCE = 2.6;
+const PERCEPTION = 3.0;     // 정렬/응집 인지 반경 (밀도 대비 충분히 커야 군집이 보임)
+const SEP_DIST = 0.7;       // 분리 거리
+
+// ── 네트워크 (폰에서 보낸 flock 수신) ──
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+let socket = null;
+let linkStatus = 'OFFLINE';
+const NET_TIMEOUT = 5000;   // 갱신 없이 이 시간 지나면 네트워크 flock 제거(ms)
 
 let weatherData = {
   cloud: 0.5,
@@ -40,6 +59,33 @@ function setup() {
   pixelDensity(1);
   noStroke();
   fetchWeather();
+
+  for (let i = 0; i < 3; i++) spawnFlock();   // 폰 없이도 볼 수 있게 로컬 데모 flock 3개
+  connectScreen();
+}
+
+// 허브 서버에 'screen'으로 접속. 폰들의 flock 상태를 받아 렌더한다. 끊기면 자동 재연결
+function connectScreen() {
+  try {
+    socket = new WebSocket(WS_URL);
+    socket.onopen = () => { linkStatus = 'ONLINE'; socket.send(JSON.stringify({ type: 'hello', role: 'screen' })); };
+    socket.onmessage = (e) => { try { onScreenMessage(JSON.parse(e.data)); } catch (_) {} };
+    socket.onclose = () => { linkStatus = 'OFFLINE'; socket = null; setTimeout(connectScreen, 2000); };
+    socket.onerror = () => {};
+  } catch (e) { linkStatus = 'OFFLINE'; }
+}
+
+function onScreenMessage(msg) {
+  if (msg.type === 'flock') {
+    let f = flocks.find(x => x.netId === msg.id);
+    if (!f) f = spawnNetFlock(msg.id, msg.hue, msg.c);
+    f.targetC = msg.c.slice();              // 최신 중심(절대 좌표)으로 보정
+    f.vel = msg.v ? msg.v.slice() : [0, 0, 0];
+    f.hue = msg.hue;
+    f.lastSeen = millis();
+  } else if (msg.type === 'leave') {
+    flocks = flocks.filter(x => x.netId !== msg.id);
+  }
 }
 
 function draw() {
@@ -49,64 +95,202 @@ function draw() {
     fetchWeather();
   }
 
-  // 마우스 위치를 0~1로 정규화하고 부드럽게 따라가도록 보간
-  let targetMx = constrain(mouseX / width, 0, 1);
-  let targetMy = constrain(mouseY / height, 0, 1);
-  mx = lerp(mx, targetMx, 0.06);
-  my = lerp(my, targetMy, 0.06);
+  let t = millis() / 1000.0;
 
-  updateCamera();
+  // 고정 카메라 + 미세 드리프트. 셰이더와 JS가 같은 ro/ta/roll을 공유해야 새가 정렬된다
+  let cr = 0.022 * Math.sin(t * 0.35);
+  camRo = [Math.sin(t * 0.05) * 0.12, 0.5 + Math.sin(t * 0.07) * 0.05, 0.0];
+  camTa = [camRo[0] + Math.sin(t * 0.03) * 0.06, camRo[1] - 0.06, camRo[2] - 1.0];
+  camBasis = computeCameraBasis(camRo, camTa, cr);
 
+  // ── 1) 배경: 풀스크린 raymarch 셰이더 ──
   shader(cloudShader);
   cloudShader.setUniform('u_resolution', [width, height]);
-  cloudShader.setUniform('u_time', millis() / 1000.0);
-  cloudShader.setUniform('u_mouse', [mx, my]);
-  cloudShader.setUniform('u_camPos', camPos);
-
+  cloudShader.setUniform('u_time', t);
+  cloudShader.setUniform('u_camPos', camRo);
+  cloudShader.setUniform('u_camTarget', camTa);
+  cloudShader.setUniform('u_roll', cr);
   quad(-1, -1, 1, -1, 1, 1, -1, 1);
-
   resetShader();
 
+  // ── 2) 그 위에 2D 합성: 새(boids) → HUD ──
   _renderer.GL.disable(_renderer.GL.DEPTH_TEST);
   translate(-width / 2, -height / 2);
+
+  // 끊긴 폰의 flock 정리(leave 메시지를 놓쳤을 때 대비)
+  flocks = flocks.filter(f => f.netId == null || millis() - f.lastSeen < NET_TIMEOUT);
+
+  updateFlocks(deltaTime / 1000.0);
+  drawFlocks();
   drawApertureHUD();
+
   _renderer.GL.enable(_renderer.GL.DEPTH_TEST);
 }
 
-// WASD: 수평 이동 / Q,E: 고도 / Shift: 부스트. 시점(yaw)을 따라 전진 방향이 회전한다.
-function updateCamera() {
-  let dt = deltaTime / 1000.0;   // 프레임레이트 독립적으로 (초 단위)
+// ───────────────────────── boids 시뮬레이션 ─────────────────────────
 
-  // 셰이더와 동일한 yaw 매핑으로 수평 전진/우측 벡터를 구한다
-  let yaw = map(mx, 0, 1, -0.99, 0.99);
-  let fx = Math.sin(yaw);
-  let fz = -1.0 + Math.cos(yaw) * 0.25;
-  let fl = Math.hypot(fx, fz);
-  fx /= fl; fz /= fl;            // 전진 방향(정규화)
-  let rx = -fz, rz = fx;         // 카메라 오른쪽 방향
-
-  let vx = 0, vy = 0, vz = 0;
-  if (keyIsDown(87)) { vx += fx; vz += fz; }   // W 전진
-  if (keyIsDown(83)) { vx -= fx; vz -= fz; }   // S 후진
-  if (keyIsDown(68)) { vx += rx; vz += rz; }   // D 우측
-  if (keyIsDown(65)) { vx -= rx; vz -= rz; }   // A 좌측
-  if (keyIsDown(69)) { vy += 1; }              // E 상승
-  if (keyIsDown(81)) { vy -= 1; }              // Q 하강
-
-  let mag = Math.hypot(vx, vy, vz);
-  if (mag > 0) {
-    // 대각 이동이 빨라지지 않도록 정규화 후 속도 적용
-    let step = MOVE_SPEED * (keyIsDown(SHIFT) ? SPRINT_MULT : 1.0) * dt / mag;
-    camPos[0] += vx * step;
-    camPos[1] += vy * step;
-    camPos[2] += vz * step;
+function spawnFlock() {
+  if (flocks.filter(f => f.netId == null).length >= MAX_FLOCKS) return;
+  let cx = random(BOX_MIN[0], BOX_MIN[0] + BOX_SIZE[0]);
+  let cy = random(BOX_MIN[1], BOX_MIN[1] + BOX_SIZE[1]);
+  let cz = random(BOX_MIN[2], BOX_MIN[2] + BOX_SIZE[2]);
+  // 같은 방향을 보고 뭉쳐서 출발 → 처음부터 정렬·응집이 성립
+  let dir = norm3([random(-1, 1), random(-0.3, 0.3), random(-1, 1)]);
+  let birds = [];
+  for (let i = 0; i < FLOCK_SIZE; i++) {
+    birds.push({
+      pos: [cx + random(-1, 1), cy + random(-0.6, 0.6), cz + random(-1, 1)],
+      vel: scale3(dir, MAX_SPEED * random(0.6, 1.0)),
+      phase: random(TWO_PI)
+    });
   }
-
-  // 바다(y=-5.2) 아래로 잠기거나 구름대 위로 완전히 벗어나지 않도록 제한
-  camPos[0] = constrain(camPos[0], -60, 60);
-  camPos[1] = constrain(camPos[1], -4.8, 4.0);
-  camPos[2] = constrain(camPos[2], -60, 60);
+  flocks.push({ hue: random(360), birds, bt: random(TWO_PI), bias: [0, 0, 0] });
 }
+
+function removeFlock() {
+  for (let i = flocks.length - 1; i >= 0; i--) {
+    if (flocks[i].netId == null) { flocks.splice(i, 1); return; }  // 데모 flock만 제거
+  }
+}
+
+// 폰에서 수신한 flock. 중심(c)은 절대 좌표 → 어항으로 mod 매핑해 앵커로 쓰고, 그 주위로 boids를 로컬 생성
+function spawnNetFlock(id, hue, c) {
+  let smoothC = c.slice();
+  let anchor = [
+    wrapAxis(c[0], BOX_MIN[0], BOX_SIZE[0]),
+    wrapAxis(c[1], BOX_MIN[1], BOX_SIZE[1]),
+    wrapAxis(c[2], BOX_MIN[2], BOX_SIZE[2])
+  ];
+  let birds = [];
+  for (let i = 0; i < FLOCK_SIZE; i++) {
+    birds.push({
+      pos: [
+        wrapAxis(anchor[0] + random(-1, 1), BOX_MIN[0], BOX_SIZE[0]),
+        wrapAxis(anchor[1] + random(-0.6, 0.6), BOX_MIN[1], BOX_SIZE[1]),
+        wrapAxis(anchor[2] + random(-1, 1), BOX_MIN[2], BOX_SIZE[2])
+      ],
+      vel: [random(-0.5, 0.5), random(-0.2, 0.2), random(-0.5, 0.5)],
+      phase: random(TWO_PI)
+    });
+  }
+  let f = { netId: id, hue, birds, targetC: c.slice(), vel: [0, 0, 0], smoothC, anchor, lastSeen: millis() };
+  flocks.push(f);
+  return f;
+}
+
+function updateFlocks(dt) {
+  dt = Math.min(dt, 0.05);   // 프레임이 튀어도 시뮬이 폭발하지 않도록
+
+  for (let f of flocks) {
+    if (f.netId != null) {
+      // 네트워크 flock: 패킷 사이를 dead reckoning(+보간)하고 어항으로 mod 매핑한 앵커를 만든다
+      f.targetC = add3(f.targetC, scale3(f.vel, dt));
+      f.smoothC = lerp3(f.smoothC, f.targetC, 0.2);
+      f.anchor = [
+        wrapAxis(f.smoothC[0], BOX_MIN[0], BOX_SIZE[0]),
+        wrapAxis(f.smoothC[1], BOX_MIN[1], BOX_SIZE[1]),
+        wrapAxis(f.smoothC[2], BOX_MIN[2], BOX_SIZE[2])
+      ];
+    } else {
+      // 로컬 데모 flock: 완만하게 회전하는 드리프트로 어항을 가로지른다
+      f.bt = (f.bt || 0) + dt * 0.15;
+      f.bias = [Math.cos(f.bt) * 0.7, Math.sin(f.bt * 0.6) * 0.25, Math.sin(f.bt) * 0.7];
+    }
+
+    let birds = f.birds;
+    for (let b of birds) {
+      let sep = [0, 0, 0], ali = [0, 0, 0], coh = [0, 0, 0];
+      let n = 0, ns = 0;
+
+      for (let o of birds) {
+        if (o === b) continue;
+        let d = toroidalDelta(b.pos, o.pos);   // b - o (반대 면 너머 이웃도 인지)
+        let dist = len3(d);
+        if (dist > 1e-5 && dist < SEP_DIST) { sep = add3(sep, scale3(d, 1 / (dist * dist))); ns++; }
+        if (dist < PERCEPTION) { ali = add3(ali, o.vel); coh = add3(coh, scale3(d, -1)); n++; }
+      }
+
+      let acc = [0, 0, 0];
+      if (ns > 0) {
+        let s = limit3(sub3(scale3(norm3(sep), MAX_SPEED), b.vel), MAX_FORCE);
+        acc = add3(acc, scale3(s, 1.6));   // 분리
+      }
+      if (n > 0) {
+        let a = limit3(sub3(scale3(norm3(scale3(ali, 1 / n)), MAX_SPEED), b.vel), MAX_FORCE);
+        acc = add3(acc, scale3(a, 1.0));   // 정렬
+        let c = limit3(sub3(scale3(norm3(scale3(coh, 1 / n)), MAX_SPEED), b.vel), MAX_FORCE);
+        acc = add3(acc, scale3(c, 1.1));   // 응집 (분리보다 멀리서 작동해 군집을 유지)
+      }
+      // 전역 유도: 네트워크 flock은 폰의 중심(앵커)으로 토러스 seek, 로컬은 드리프트 bias
+      if (f.netId != null) {
+        let toA = toroidalDelta(f.anchor, b.pos);   // 앵커 - b (반대 면 너머도 최단으로)
+        let seek = limit3(sub3(scale3(norm3(toA), MAX_SPEED), b.vel), MAX_FORCE);
+        acc = add3(acc, scale3(seek, 0.8));
+      } else {
+        acc = add3(acc, scale3(f.bias, MAX_FORCE * 0.5));
+      }
+
+      b.vel = limit3(add3(b.vel, scale3(acc, dt)), MAX_SPEED);
+      if (len3(b.vel) < 0.3) b.vel = scale3(norm3(add3(b.vel, [0.01, 0, 0.01])), 0.3);
+      b.pos = add3(b.pos, scale3(b.vel, dt));
+
+      // 전 축 주기 경계: 한 면으로 나가면 반대 면에서 재등장
+      b.pos = [
+        wrapAxis(b.pos[0], BOX_MIN[0], BOX_SIZE[0]),
+        wrapAxis(b.pos[1], BOX_MIN[1], BOX_SIZE[1]),
+        wrapAxis(b.pos[2], BOX_MIN[2], BOX_SIZE[2])
+      ];
+    }
+
+    // 데모 flock은 레이더 표시용 중심을 직접 계산(네트워크 flock은 anchor가 이미 있음)
+    if (f.netId == null) f.anchor = flockCentroid(f.birds);
+  }
+}
+
+// ───────────────────────── 새 렌더(셰이더와 동일 카메라로 직접 투영) ─────────────────────────
+
+function drawFlocks() {
+  let t = millis() / 1000.0;
+  let bright = birdBrightness(t);
+
+  // 모든 새를 투영해 모은 뒤 먼 것부터 그린다(화가 알고리즘)
+  let list = [];
+  for (let f of flocks) {
+    let col = flockColor(f.hue, bright);
+    for (let b of f.birds) {
+      let pr = projectToScreen(b.pos, camRo, camBasis);
+      if (!pr) continue;
+      list.push({ b, pr, col });
+    }
+  }
+  list.sort((A, B) => B.pr.vf - A.pr.vf);
+
+  for (let item of list) drawBird(item, t);
+}
+
+function drawBird(item, t) {
+  let { b, pr, col } = item;
+
+  // 화면상 진행 방향(heading): 살짝 앞 지점을 같은 카메라로 투영해 2D 각도를 구함
+  let ahead = projectToScreen(add3(b.pos, scale3(norm3(b.vel), 0.25)), camRo, camBasis);
+  let heading = ahead ? Math.atan2(ahead.sy - pr.sy, ahead.sx - pr.sx) : 0;
+
+  // 알파: 면 근처 fade shell(이음새 숨김) × 원거리 안개
+  let a = shellAlpha(b.pos) * (1 - smooth01(9.0, 13.0, pr.vf));
+  drawBirdSprite(pr.sx, pr.sy, pr.vf, heading, col, a, b.phase, t);
+}
+
+// 면에 가까울수록 0으로 페이드 → 반대 면 재등장 순간을 안개처럼 가린다
+function shellAlpha(p) {
+  let a = 1;
+  for (let i = 0; i < 3; i++) {
+    let d = Math.min(p[i] - BOX_MIN[i], BOX_MIN[i] + BOX_SIZE[i] - p[i]);
+    a *= smooth01(0.0, SHELL, d);
+  }
+  return a;
+}
+
+// ───────────────────────── 날씨 (HUD readout 전용) ─────────────────────────
 
 async function fetchWeather() {
   try {
@@ -237,6 +421,57 @@ function drawWeatherHUD() {
   pop();
 }
 
+// 각 flock(=한 명의 비행자)의 실제 화면 위치에 레이더 락온 박스를 그린다.
+// 네트워크 flock은 'FLYER #id', 로컬 데모는 'SIM'. 박스 색 = 그 유저의 새떼 색
+function drawUserReticles() {
+  for (let f of flocks) {
+    if (!f.anchor) continue;
+    let pr = projectToScreen(f.anchor, camRo, camBasis);
+    if (!pr) continue;   // 카메라 뒤면 스킵
+
+    let col = flockColor(f.hue, 1.0);
+    let isLive = f.netId != null;
+
+    // 레이더 잔상(트레일)
+    if (!f.trail) f.trail = [];
+    if (frameCount % 5 === 0) {
+      f.trail.push([pr.sx, pr.sy]);
+      if (f.trail.length > 7) f.trail.shift();
+    }
+    noFill();
+    strokeWeight(1.2);
+    for (let i = 0; i < f.trail.length; i++) {
+      let a = map(i, 0, max(1, f.trail.length - 1), 22, 120);
+      let s = lerp(7, 15, i / max(1, f.trail.length - 1));
+      stroke(col[0], col[1], col[2], a);
+      rect(f.trail[i][0] - s / 2, f.trail[i][1] - s / 2, s, s);
+    }
+
+    // 락온 박스: 코너 브래킷 + 십자
+    let R = 26, c = 9;
+    let L = pr.sx - R, T = pr.sy - R, Rr = pr.sx + R, B = pr.sy + R;
+    stroke(col[0], col[1], col[2], 235);
+    strokeWeight(2);
+    line(L, T, L + c, T); line(L, T, L, T + c);
+    line(Rr, T, Rr - c, T); line(Rr, T, Rr, T + c);
+    line(L, B, L + c, B); line(L, B, L, B - c);
+    line(Rr, B, Rr - c, B); line(Rr, B, Rr, B - c);
+    strokeWeight(1.2);
+    line(pr.sx - 7, pr.sy, pr.sx + 7, pr.sy);
+    line(pr.sx, pr.sy - 7, pr.sx, pr.sy + 7);
+
+    // 라벨
+    noStroke();
+    textAlign(LEFT, BASELINE);
+    fill(col[0], col[1], col[2], 240);
+    textSize(11);
+    text(isLive ? "FLYER #" + f.netId : "SIM " + floor(f.hue), Rr + 8, pr.sy - 5);
+    fill(col[0], col[1], col[2], 175);
+    textSize(9);
+    text("DIST " + nf(pr.vf * 0.4, 1, 2) + " KM", Rr + 8, pr.sy + 9);
+  }
+}
+
 function drawApertureHUD() {
   let cream = color('#FDFDED');
   let transparentCream = color(253, 253, 237, 80);
@@ -310,52 +545,17 @@ function drawApertureHUD() {
 
   pop();
 
-  let targetX = noise(frameCount * 0.005) * (width - 300) + 150;
-  let targetY = noise(frameCount * 0.005 + 500) * (height - 300) + 150;
+  drawUserReticles();
 
-  if (frameCount % 45 === 0) {
-    targetHistory.push({ x: targetX, y: targetY, alpha: 255 });
-    if (targetHistory.length > MAX_HISTORY) {
-      targetHistory.shift();
-    }
-  }
-
-  for (let i = 0; i < targetHistory.length; i++) {
-    let hist = targetHistory[i];
-    hist.alpha -= 0.5;
-
-    let markerColor = color(253, 253, 237, hist.alpha);
-
-    stroke(markerColor);
-    strokeWeight(1.5);
-    noFill();
-    rect(hist.x - 6, hist.y - 6, 12, 12);
-
-    noStroke();
-    fill(markerColor);
-    textSize(10);
-    text(`x: ${floor(hist.x)} y: ${floor(hist.y)}`, hist.x + 12, hist.y + 4);
-  }
-
-  stroke(cream);
-  strokeWeight(2);
-  noFill();
-  rect(targetX - 25, targetY - 25, 50, 50);
-
-  noStroke();
-  fill(cream);
-  textSize(10);
-  text("LOCK_ID: OBJ_" + floor(noise(frameCount * 0.001) * 9000), targetX + 32, targetY - 12);
-  text("DIST: " + nf(noise(frameCount * 0.01) * 5, 1, 2) + " KM", targetX + 32, targetY);
-
+  let totalBirds = flocks.length * FLOCK_SIZE;
+  let liveFlyers = flocks.filter(f => f.netId != null).length;
   textSize(14);
-  text("CAMERA FRAME RATE: " + floor(frameRate()) + " FPS", 50, 60);
-  // 고도는 해수면(y=-5.2) 기준 실제 카메라 높이를 미터로 환산
-  text("ATMOSPHERE ALTITUDE: " + floor((camPos[1] + 5.2) * 800) + " M", 50, 85);
-  text("NAV  X:" + nf(camPos[0], 1, 1) + "  Z:" + nf(camPos[2], 1, 1), 50, 110);
+  text("FEED // SOGANG-MAPO AERIAL   " + floor(frameRate()) + " FPS", 50, 60);
+  text("LINK: " + linkStatus + "    LIVE FLYERS: " + liveFlyers, 50, 85);
+  text("ACTIVE FLOCKS: " + flocks.length + "    BIRDS: " + totalBirds, 50, 110);
 
   fill(transparentCream);
-  text("FLIGHT  W A S D MOVE   Q E ALT   SHIFT BOOST", 50, 135);
+  text("SCAN QR TO RELEASE YOUR FLOCK     [N] +FLOCK   [X] -FLOCK   (DEMO)", 50, 135);
   fill(cream);
 
   drawWeatherHUD();
@@ -370,11 +570,49 @@ function drawApertureHUD() {
 
 function keyPressed() {
   if (key === 'f' || key === 'F') {
-    let fs = fullscreen();
-    fullscreen(!fs);
+    fullscreen(!fullscreen());
+  }
+  if (key === 'n' || key === 'N') {
+    spawnFlock();   // 데모: 유저 접속 흉내
+  }
+  if (key === 'x' || key === 'X') {
+    removeFlock();  // 데모: 유저 퇴장 흉내
   }
 }
 
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
+}
+
+// ───────────────────────── 어항 주기 경계(스크린 전용) ─────────────────────────
+// (공용 벡터/투영 수학은 common.js)
+
+// 주기 경계 안으로 좌표를 감는다(음수 모듈로 처리)
+function wrapAxis(x, min, size) {
+  let r = (x - min) % size;
+  if (r < 0) r += size;
+  return min + r;
+}
+
+// 박스 크기의 절반을 넘는 거리는 반대편으로 감아 토러스 위 최단 벡터(a - b)를 만든다
+function toroidalDelta(a, b) {
+  let d = sub3(a, b);
+  for (let i = 0; i < 3; i++) {
+    if (d[i] > BOX_SIZE[i] * 0.5) d[i] -= BOX_SIZE[i];
+    else if (d[i] < -BOX_SIZE[i] * 0.5) d[i] += BOX_SIZE[i];
+  }
+  return d;
+}
+
+// flock 새들의 wrap-aware 평균 위치(레이더 표시용 중심). 새가 경계를 걸쳐도 한쪽으로 모아 평균낸다
+function flockCentroid(birds) {
+  let ref = birds[0].pos;
+  let s = [0, 0, 0];
+  for (let b of birds) s = add3(s, toroidalDelta(b.pos, ref));
+  let m = add3(ref, scale3(s, 1 / birds.length));
+  return [
+    wrapAxis(m[0], BOX_MIN[0], BOX_SIZE[0]),
+    wrapAxis(m[1], BOX_MIN[1], BOX_SIZE[1]),
+    wrapAxis(m[2], BOX_MIN[2], BOX_SIZE[2])
+  ];
 }

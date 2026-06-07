@@ -1,0 +1,12 @@
+{
+  "name": "flock-installation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "공공 스크린 + 폰 클라이언트 새떼(boids) 설치물 — 허브 서버",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
+}

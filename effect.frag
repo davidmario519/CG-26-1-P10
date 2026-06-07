@@ -5,8 +5,9 @@ out vec4 fragColor;
 
 uniform vec2 u_resolution;
 uniform float u_time;
-uniform vec2 u_mouse;
-uniform vec3 u_camPos;  // JS가 WASD 입력으로 누적해 넘겨주는 카메라 위치
+uniform vec3 u_camPos;     // 카메라 위치 (메인 스크린: 고정 + 미세 드리프트)
+uniform vec3 u_camTarget;  // 카메라가 바라보는 지점
+uniform float u_roll;      // 카메라 roll(뱅킹). 메인=미세 드리프트, 폰=선회 기울기
 
 #define TURBULENCE 0
 
@@ -398,25 +399,12 @@ void main() {
 
     float t = u_time;
 
-float yawRange = 0.99;
-float pitchDown = -0.70;
-float pitchUp = 0.32;
-
-// 마우스로 시점을 직접 조종 (u_mouse는 0~1 정규화 좌표)
-float yaw = mix(-yawRange, yawRange, u_mouse.x);   // mouseX → Yaw(좌우)
-float pitch = mix(pitchUp, pitchDown, u_mouse.y);  // mouseY → Pitch(상하, 화면 위=올려다봄)
-pitch = clamp(pitch, pitchDown, pitchUp);
-
-    // 카메라 위치는 JS가 WASD 입력으로 누적해 넘겨준다 (자유 비행)
+    // 카메라는 JS가 고정 origin/target으로 제어한다 (메인 스크린: 고정 시점)
+    // 같은 ro/ta/roll로 JS가 새(boids)를 동일하게 투영해 화면에 정렬시킨다.
     vec3 ro = u_camPos;
+    vec3 ta = u_camTarget;
 
-    vec3 ta = ro + vec3(
-        sin(yaw),
-        pitch,
-        -1.0 + cos(yaw) * 0.25
-    );
-
-    mat3 ca = setCamera(ro, ta, 0.022 * sin(t * 0.35));
+    mat3 ca = setCamera(ro, ta, u_roll);
     vec3 rd = ca * normalize(vec3(p.xy, 1.5));
 
     fragColor = render(ro, rd, ivec2(fragCoord - 0.5));
