@@ -330,21 +330,22 @@ for (int i = 0; i < STEPS; i++) { \
     vec3 pos = ro + t * rd; \
     if (sum.a > 0.99) break; \
     if (pos.y < -5.5 || pos.y > 4.5) { \
-        t += max(0.06, 0.042 * t); \
+        t += max(0.06, 0.10 * t); \
         continue; \
     } \
     float den = MAPLOD(pos); \
+    if (den < 0.01) { t += max(0.06, 0.042 * t); continue; } \
     den *= holeMask(pos); \
     if (den > 0.01) { \
         vec3 lightPos = pos + 0.3 * cloudLightDir; \
-        float lightDen = MAPLOD(lightPos) * holeMask(lightPos); \
+        float lightDen = map2(lightPos) * holeMask(lightPos); \
         float dif = clamp((den - lightDen) / 0.6, 0.0, 1.0); \
         vec3 cloudBright = getTimeCloudColor(dayCycle); \
         vec3 cloudDark = getTimeCloudShadowColor(dayCycle); \
         vec3 lin = vec3(1.0, 0.6, 0.3) * dif + vec3(0.91, 0.98, 1.05); \
         vec4 col = vec4(mix(cloudBright, cloudDark, den), den); \
         col.xyz *= lin; \
-        col.xyz = mix(col.xyz, bgcol, 1.0 - exp(-0.0008 * t * t)); \
+        col.xyz = mix(col.xyz, bgcol, 1.0 - exp(-0.0004 * t * t)); \
         col.w *= 0.4; \
         col.rgb *= col.a; \
         sum += col * (1.0 - sum.a); \
@@ -356,10 +357,10 @@ vec4 raymarch(in vec3 ro, in vec3 rd, in vec3 bgcol, in ivec2 px, float dayCycle
     vec4 sum = vec4(0.0);
     float t = 0.05 * hash(vec3(vec2(px), u_time));
 
-    MARCH(40, map5);
-    MARCH(32, map4);
-    MARCH(24, map3);
-    MARCH(16, map2);
+    MARCH(24, map5);
+    MARCH(12, map4);
+    MARCH(10, map3);
+    MARCH(8, map2);
 
     return clamp(sum, 0.0, 1.0);
 }
@@ -396,31 +397,24 @@ void main() {
 
     float t = u_time;
 
-float lookSpeed = 0.13;
 float heightSpeed = 0.08;
-float yawRange = 0.85;
+float yawRange = 0.99;
 float pitchDown = -0.70;
 float pitchUp = 0.32;
 float cameraLow = -0.45;
-float cameraHigh = 1.45;float nYaw = noise(vec3(t * lookSpeed, 0.0, 0.0)) * 0.5 + 0.5;
-float nPitch = noise(vec3(t * lookSpeed * 1.4, 8.0, 0.0)) * 0.5 + 0.5;
+float cameraHigh = 1.45;
+
+// 마우스로 시점을 직접 조종 (u_mouse는 0~1 정규화 좌표)
+float yaw = mix(-yawRange, yawRange, u_mouse.x);   // mouseX → Yaw(좌우)
+float pitch = mix(pitchUp, pitchDown, u_mouse.y);  // mouseY → Pitch(상하, 화면 위=올려다봄)
+
+// 카메라 높이는 기존처럼 자동으로 떠다니게 유지
 float nHeight = noise(vec3(t * heightSpeed, 15.0, 2.0)) * 0.5 + 0.5;
-
-float yaw = mix(-yawRange, yawRange, nYaw);
-float pitch = mix(pitchDown, pitchUp, nPitch);
 float camY = mix(cameraLow, cameraHigh, nHeight);
-
-// 멈춰 보이는 구간 방지용 보조 움직임
-yaw += sin(t * 0.31) * 0.12;
-yaw += sin(t * 0.117 + 1.7) * 0.08;
-
-pitch += sin(t * 0.37 + 2.1) * 0.08;
-pitch += sin(t * 0.149) * 0.05;
-
 camY += sin(t * 0.21 + 0.8) * 0.10;
 
-pitch = clamp(pitch, -0.70, 0.32);
-camY = clamp(camY, -0.45, 1.45);
+pitch = clamp(pitch, pitchDown, pitchUp);
+camY = clamp(camY, cameraLow, cameraHigh);
     vec3 ro = vec3(
         sin(t * 0.08) * 0.18,
         camY,

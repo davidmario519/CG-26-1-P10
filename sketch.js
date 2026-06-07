@@ -44,6 +44,12 @@ function draw() {
     fetchWeather();
   }
 
+  // 마우스 위치를 0~1로 정규화하고 부드럽게 따라가도록 보간
+  let targetMx = constrain(mouseX / width, 0, 1);
+  let targetMy = constrain(mouseY / height, 0, 1);
+  mx = lerp(mx, targetMx, 0.06);
+  my = lerp(my, targetMy, 0.06);
+
   shader(cloudShader);
   cloudShader.setUniform('u_resolution', [width, height]);
   cloudShader.setUniform('u_time', millis() / 1000.0);
