@@ -1,0 +1,10 @@
+# 의존성 (호스트가 npm install로 직접 설치 — 커밋하지 않음)
+node_modules/
+
+# OS / 에디터
+.DS_Store
+*.log
+
+# 환경변수
+.env
+.env.local
