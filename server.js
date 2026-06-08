@@ -71,6 +71,11 @@ wss.on('connection', (ws) => {
       info.role = msg.role === 'screen' ? 'screen' : 'phone';
       if (typeof msg.hue === 'number') info.hue = msg.hue;
 
+      // 폰에게 자기 식별자를 즉시 회신 → 폰 HUD가 메인 스크린의 'FLYER #id'와 같은 ID를 표시
+      if (info.role === 'phone') {
+        ws.send(JSON.stringify({ type: 'welcome', id: info.id }));
+      }
+
       // 새 스크린에게 현재 접속 중인 폰들의 마지막 상태를 즉시 전달(roster)
       if (info.role === 'screen') {
         for (const [, c] of clients) {
