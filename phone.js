@@ -41,6 +41,7 @@ const COMP_MAX_SPEED = 5.0;     // 카메라(CRUISE)보다 빨라야 따라잡�
 const COMP_MAX_FORCE = 7.0;
 const LEAD_DIST = 6.0;          // 카메라 앞쪽 앵커 거리(새떼가 머무는 지점)
 let flockHue = 45;              // 내 새떼 색(접속 시 랜덤 → 스크린에서 개별 식별)
+let myId = null;               // 서버가 부여한 내 식별자(메인 스크린의 'FLYER #id'와 동일)
 
 // ── 네트워크 ──
 const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
@@ -96,9 +97,15 @@ function connectPhone() {
   try {
     socket = new WebSocket(WS_URL);
     socket.onopen = () => socket.send(JSON.stringify({ type: 'hello', role: 'phone', hue: flockHue }));
+    socket.onmessage = (e) => { try { onPhoneMessage(JSON.parse(e.data)); } catch (_) {} };
     socket.onclose = () => { socket = null; setTimeout(connectPhone, 2000); };
     socket.onerror = () => {};
   } catch (e) { /* 서버 없으면 비행만 로컬로 계속 */ }
+}
+
+// 서버 회신 처리: 'welcome'으로 내 식별자를 받아 HUD에 표시(메인 스크린의 'FLYER #id'와 동일)
+function onPhoneMessage(msg) {
+  if (msg.type === 'welcome' && typeof msg.id === 'number') myId = msg.id;
 }
 
 // 첫 탭/클릭: 비행 시작 + 모션 권한 (둘 다 이 DOM 제스처 안에서)
@@ -305,15 +312,20 @@ function drawPhoneHUD(t) {
   line(cx, cy + 5, cx, cy + 14);
 
   noStroke();
-  fill(253, 253, 237, 220);
   textAlign(LEFT, TOP);
+
+  // 메인 스크린에 뜨는 내 식별 정보: 새떼 색 스와치 + 'FLYER #id'
+  let myCol = flockColor(flockHue, 1.0);   // 스크린 락온 박스와 같은 색(밝기 1.0)
+  fill(myCol[0], myCol[1], myCol[2], 240);
+  rect(20, 22, 13, 13);
+  fill(253, 253, 237, 230);
   textSize(13);
-  text("FLOCK · YOU", 20, 20);
+  text(myId != null ? "YOU · FLYER #" + myId : "YOU · CONNECTING…", 40, 21);
 
   fill(253, 253, 237, 150);
   textSize(11);
   let hdg = floor(degrees(((yaw % TWO_PI) + TWO_PI) % TWO_PI));
-  text("SPD " + nf(CRUISE, 1, 1) + "   HDG " + hdg + "°   [" + (useTilt ? "TILT" : "DRAG") + "]", 20, 40);
+  text("HUE " + flockHue + "°   SPD " + nf(CRUISE, 1, 1) + "   HDG " + hdg + "°   [" + (useTilt ? "TILT" : "DRAG") + "]", 20, 42);
 
   // 모션 진단: 권한 상태 / 수신 이벤트 수 / 현재 기울기값
   text("MOTION: " + permState + "   evt:" + tiltEvents
